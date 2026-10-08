@@ -1,0 +1,101 @@
+name: MODEL A zero-cost public synthetic custody proof
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/model-a-synthetic-free-custody.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: model-a-zero-cost-synthetic-poc
+  cancel-in-progress: false
+
+jobs:
+  producer:
+    if: github.repository == 'othmaneelghazzali-blip/model-a-public-synthetic-custody'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    outputs:
+      evidence_branch: ${{ steps.commit_proof.outputs.evidence_branch }}
+      evidence_commit: ${{ steps.commit_proof.outputs.evidence_commit }}
+    steps:
+      - name: Checkout public synthetic-only repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: true
+      - name: Create and commit synthetic witness only
+        id: commit_proof
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PROOF_BRANCH="poc-evidence/p3c001-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          git switch -c "$PROOF_BRANCH"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          mkdir -p synthetic-proof
+          python3 - <<'PYDATA'
+          import hashlib,json,os,pathlib
+          root=pathlib.Path('synthetic-proof')
+          payload=b'MODEL_A_PUBLIC_P3C001_ZERO_COST_SYNTHETIC_V1\nNO_FACTUAL_SCIENCE\n'
+          (root/'payload.bin').write_bytes(payload)
+          record={
+           'identity':'MODEL_A_PUBLIC_P3C001_ZERO_COST_SYNTHETIC_V1',
+           'repository':os.environ['GITHUB_REPOSITORY'],
+           'run_id':os.environ['GITHUB_RUN_ID'],
+           'run_attempt':os.environ['GITHUB_RUN_ATTEMPT'],
+           'payload_sha256':hashlib.sha256(payload).hexdigest(),
+           'payload_bytes':len(payload),
+           'science_calls':0,
+           'dataset':'SYNTHETIC_PUBLIC_ONLY'
+          }
+          (root/'record.json').write_text(json.dumps(record,sort_keys=True,separators=(',',':'))+'\n')
+          PYDATA
+          (cd synthetic-proof && sha256sum payload.bin record.json > SHA256SUMS.txt && sha256sum -c SHA256SUMS.txt)
+          git add synthetic-proof/payload.bin synthetic-proof/record.json synthetic-proof/SHA256SUMS.txt
+          git commit -m 'P3C001 public synthetic-only immutable custody proof'
+          git push origin "HEAD:refs/heads/$PROOF_BRANCH"
+          echo "evidence_branch=$PROOF_BRANCH" >> "$GITHUB_OUTPUT"
+          echo "evidence_commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+  independent_consumer:
+    needs: producer
+    if: github.repository == 'othmaneelghazzali-blip/model-a-public-synthetic-custody'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Fresh VM readback of separately committed evidence
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ needs.producer.outputs.evidence_commit }}
+          persist-credentials: false
+      - name: Independently check synthetic witness and immutable commit
+        shell: bash
+        env:
+          EXPECTED_COMMIT: ${{ needs.producer.outputs.evidence_commit }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_COMMIT"
+          (cd synthetic-proof && sha256sum -c SHA256SUMS.txt)
+          python3 - <<'PYVERIFY'
+          import json,hashlib,os,pathlib
+          root=pathlib.Path('synthetic-proof')
+          payload=(root/'payload.bin').read_bytes()
+          record=json.loads((root/'record.json').read_text())
+          assert payload==b'MODEL_A_PUBLIC_P3C001_ZERO_COST_SYNTHETIC_V1\nNO_FACTUAL_SCIENCE\n'
+          assert record['identity']=='MODEL_A_PUBLIC_P3C001_ZERO_COST_SYNTHETIC_V1'
+          assert record['repository']=='othmaneelghazzali-blip/model-a-public-synthetic-custody'
+          assert record['run_id']==os.environ['GITHUB_RUN_ID']
+          assert record['run_attempt']==os.environ['GITHUB_RUN_ATTEMPT']
+          assert record['payload_sha256']==hashlib.sha256(payload).hexdigest()
+          assert record['payload_bytes']==len(payload)
+          assert record['science_calls']==0
+          assert record['dataset']=='SYNTHETIC_PUBLIC_ONLY'
+          print('P3C001 SYNTHETIC PUBLIC CROSS-RUNNER GIT CUSTODY: PASS')
+          PYVERIFY
